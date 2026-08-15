@@ -11,8 +11,7 @@ const { Pool } = pg;
 const app = express();
 const PORT = process.env.PORT || 10000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized:false } });
-const cashfreeMode = String(process.env.CASHFREE_ENV || 'sandbox').toLowerCase() === 'production' ? 'production' : 'sandbox';
-const cfBase = cashfreeMode === 'production' ? 'https://api.cashfree.com' : 'https://sandbox.cashfree.com';
+const cfBase = process.env.CASHFREE_ENV === 'production' ? 'https://api.cashfree.com' : 'https://sandbox.cashfree.com';
 
 async function initDatabase() {
   if (!process.env.DATABASE_URL) {
@@ -37,8 +36,8 @@ async function cf(pathname, options={}) {
   const r = await fetch(cfBase + pathname, {
     ...options,
     headers:{
-      'x-client-id':(process.env.CASHFREE_CLIENT_ID || process.env.CASHFREE_APP_ID),
-      'x-client-secret':process.env.CASHFREE_CLIENT_SECRET,
+      'x-client-id':clientId,
+      'x-client-secret':clientSecret,
       'x-api-version':'2025-01-01',
       'Accept':'application/json','Content-Type':'application/json',
       ...(options.headers||{})
@@ -51,7 +50,7 @@ async function cf(pathname, options={}) {
 }
 
 app.get('/api/health', async (req,res)=>{
-  try { await pool.query('SELECT 1'); res.json({ok:true, paymentsConfigured:!!((process.env.CASHFREE_CLIENT_ID || process.env.CASHFREE_APP_ID) && process.env.CASHFREE_CLIENT_SECRET), cashfreeMode}); }
+  try { await pool.query('SELECT 1'); res.json({ok:true, paymentsConfigured:!!((process.env.CASHFREE_CLIENT_ID || process.env.CASHFREE_APP_ID) && (process.env.CASHFREE_CLIENT_SECRET || process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET)),cashfreeMode:process.env.CASHFREE_ENV==='production'?'production':'sandbox'}); }
   catch(e){ res.status(503).json({ok:false,error:e.message}); }
 });
 
@@ -65,9 +64,12 @@ app.post('/api/orders', async (req,res)=>{
     if(money(amount)!==calculated) return res.status(400).json({error:'Order total mismatch. Please refresh cart and try again.'});
     const orderId='ZEVQORA_'+Date.now()+'_'+crypto.randomBytes(3).toString('hex').toUpperCase();
     await pool.query(`INSERT INTO orders(order_id,customer_name,customer_phone,customer_email,address,city,state,pincode,amount,items) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[orderId,customer.name,safePhone(customer.phone),customer.email||null,address.line1,address.city,address.state,address.pincode,calculated,JSON.stringify(cleanItems)]);
-    const cfOrder=await cf('/pg/orders',{method:'POST',body:JSON.stringify({order_id:orderId,order_amount:calculated,order_currency:'INR',customer_details:{customer_id:safePhone(customer.phone),customer_name:customer.name,customer_email:customer.email||undefined,customer_phone:safePhone(customer.phone)},order_meta:{return_url:`${(process.env.FRONTEND_BASE_URL || process.env.PUBLIC_BASE_URL || '').replace(/\/$/,'')}/?payment_return=1&order_id={order_id}`,notify_url:`${process.env.PUBLIC_BASE_URL}/api/cashfree/webhook`},order_note:'ZEVQORA online order'})});
+    const cfOrder=await cf('/pg/orders',{method:'POST',body:JSON.stringify({order_id:orderId,order_amount:calculated,order_currency:'INR',customer_details:{customer_id:safePhone(customer.phone),customer_name:customer.name,customer_email:customer.email||undefined,customer_phone:safePhone(customer.phone)},order_meta:{
+        return_url:`${process.env.FRONTEND_BASE_URL || process.env.PUBLIC_BASE_URL}/?payment_return=1&order_id={order_id}`,
+        notify_url:`${process.env.PUBLIC_BASE_URL}/api/cashfree/webhook`
+      },order_note:'ZEVQORA online order'})});
     await pool.query(`UPDATE orders SET cashfree_payment_session_id=$1,updated_at=NOW() WHERE order_id=$2`,[cfOrder.payment_session_id,orderId]);
-    res.json({orderId,paymentSessionId:cfOrder.payment_session_id,amount:calculated,cashfreeMode});
+    res.json({orderId,paymentSessionId:cfOrder.payment_session_id,amount:calculated,cashfreeMode:process.env.CASHFREE_ENV==='production'?'production':'sandbox'});
   } catch(e){ console.error(e); res.status(500).json({error:e.message}); }
 });
 
