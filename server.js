@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import express from 'express';
 import pg from 'pg';
 import crypto from 'crypto';
@@ -9,6 +12,19 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized:false } });
 const cfBase = process.env.CASHFREE_ENV === 'production' ? 'https://api.cashfree.com' : 'https://sandbox.cashfree.com';
+
+async function initDatabase() {
+  if (!process.env.DATABASE_URL) {
+    console.warn('DATABASE_URL not set; skipping schema initialization.');
+    return;
+  }
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const schemaPath = path.join(__dirname, 'schema.sql');
+  const schema = await fs.readFile(schemaPath, 'utf8');
+  await pool.query(schema);
+  console.log('Database schema initialized successfully.');
+}
 
 app.use(cors({ origin: true }));
 app.use(express.json({ verify:(req,res,buf)=>{ req.rawBody=buf.toString('utf8'); } }));
@@ -100,4 +116,6 @@ app.get('/api/payment-status/:orderId', async (req,res)=>{
   } catch(e){res.status(500).json({error:e.message});}
 });
 
-app.listen(PORT,()=>console.log(`ZEVQORA server listening on ${PORT}`));
+initDatabase()
+  .then(() => app.listen(PORT,()=>console.log(`ZEVQORA server listening on ${PORT}`)))
+  .catch(err => { console.error('Database schema initialization failed:', err); process.exit(1); });
