@@ -1,124 +1,29 @@
-import 'dotenv/config';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import express from 'express';
-import pg from 'pg';
-import crypto from 'crypto';
 import cors from 'cors';
+import dotenv from 'dotenv';
+dotenv.config();
+const app=express();
+app.use(cors({origin:process.env.FRONTEND_URL||'*'}));
+app.use(express.json({limit:'1mb'}));
 
-const { Pool } = pg;
-const app = express();
-const PORT = process.env.PORT || 10000;
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized:false } });
-const cfBase = process.env.CASHFREE_ENV === 'production' ? 'https://api.cashfree.com' : 'https://sandbox.cashfree.com';
+const categories=['Fashion',"Men's Fashion","Women's Fashion",'Kids','Electronics','Mobiles & Accessories','Computers & Laptops','Home & Kitchen','Furniture','Beauty & Personal Care','Grocery','Sports & Fitness','Footwear','Watches','Bags','Jewellery','Toys','Automotive','Books','Health & Wellness','Daily Essentials'];
+const image='https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=900&q=80';
+const names=['Aero Wireless Headphones','Urban Everyday Sneakers','Nova Smart Watch','Minimal Desk Lamp','Everyday Backpack','Pulse Fitness Band','Classic Chronograph Watch','Luma Travel Bottle','Core Cotton Hoodie','Studio Bluetooth Speaker'];
+const products=Array.from({length:100},(_,i)=>({id:i+1,name:`${names[i%names.length]} ${i+1}`,slug:`product-${i+1}`,description:'A carefully selected ZEVQORA product designed for everyday use, combining practical features with a premium finish.',category:categories[i%categories.length],subcategory:'Featured',brand:['ZEVQORA','Aero','Nova','Urban','Core'][i%5],price:499+(i%20)*250,original_price:899+(i%20)*400,discount_percentage:20+(i%5)*5,images:[image],rating:Number((4+(i%10)/10).toFixed(1)),review_count:20+i,stock:10+(i%40),SKU:`ZQ-${String(i+1).padStart(4,'0')}`,specifications:{Material:'Premium grade',Warranty:'6 months',Country:'India'},variants:{color:['Black','White','Silver'],size:['S','M','L','XL']},seller:'ZEVQORA Marketplace',warranty:'6 months',delivery_information:'Fast delivery available'}));
 
-async function initDatabase() {
-  if (!process.env.DATABASE_URL) {
-    console.warn('DATABASE_URL not set; skipping schema initialization.');
-    return;
-  }
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-  const schemaPath = path.join(__dirname, 'schema.sql');
-  const schema = await fs.readFile(schemaPath, 'utf8');
-  await pool.query(schema);
-  console.log('Database schema initialized successfully.');
-}
+app.get('/api/health',(req,res)=>res.json({ok:true,service:'ZEVQORA API'}));
+app.get('/api/products',(req,res)=>{let out=products;const {category,q}=req.query;if(category)out=out.filter(p=>p.category===category);if(q)out=out.filter(p=>(p.name+p.brand+p.category).toLowerCase().includes(String(q).toLowerCase()));res.json({products:out,total:out.length});});
+app.get('/api/products/:id',(req,res)=>{const p=products.find(x=>x.id===Number(req.params.id));if(!p)return res.status(404).json({message:'Product not found'});res.json({product:p});});
+app.get('/api/categories',(req,res)=>res.json({categories}));
+app.get('/api/search',(req,res)=>{const q=String(req.query.q||'');const out=products.filter(p=>(p.name+' '+p.brand+' '+p.category).toLowerCase().includes(q.toLowerCase()));res.json({products:out});});
 
-app.use(cors({ origin: true }));
-app.use(express.json({ verify:(req,res,buf)=>{ req.rawBody=buf.toString('utf8'); } }));
+// Supabase and Cashfree are intentionally server-side integrations.
+// Add credentials to .env before enabling these endpoints.
+app.post('/api/payment/create-order',async(req,res)=>{if(!process.env.CASHFREE_APP_ID||!process.env.CASHFREE_SECRET_KEY)return res.status(503).json({message:'Cashfree is not configured. Add CASHFREE_APP_ID and CASHFREE_SECRET_KEY on the backend.'});return res.status(501).json({message:'Connect this endpoint to the current Cashfree Orders API/SDK using the credentials above.'});});
+app.post('/api/payment/verify',(req,res)=>res.status(501).json({message:'Cashfree verification endpoint is ready for server-side implementation.'}));
+app.post('/api/payment/webhook',(req,res)=>res.status(501).json({message:'Cashfree webhook route reserved; configure signature verification before production.'}));
+app.get('/api/payment/status/:orderId',(req,res)=>res.json({orderId:req.params.orderId,status:'pending'}));
 
-const money = n => Math.round(Number(n)*100)/100;
-const safePhone = p => String(p||'').replace(/\D/g,'').slice(-10);
-
-async function cf(pathname, options={}) {
-  const r = await fetch(cfBase + pathname, {
-    ...options,
-    headers:{
-      'x-client-id':clientId,
-      'x-client-secret':clientSecret,
-      'x-api-version':'2025-01-01',
-      'Accept':'application/json','Content-Type':'application/json',
-      ...(options.headers||{})
-    }
-  });
-  const text = await r.text();
-  let data; try { data=JSON.parse(text); } catch { data={raw:text}; }
-  if(!r.ok) throw new Error(data.message || data.error || `Cashfree HTTP ${r.status}`);
-  return data;
-}
-
-app.get('/api/health', async (req,res)=>{
-  try { await pool.query('SELECT 1'); res.json({ok:true, paymentsConfigured:!!((process.env.CASHFREE_CLIENT_ID || process.env.CASHFREE_APP_ID) && (process.env.CASHFREE_CLIENT_SECRET || process.env.CASHFREE_SECRET_KEY || process.env.CASHFREE_SECRET)),cashfreeMode:process.env.CASHFREE_ENV==='production'?'production':'sandbox'}); }
-  catch(e){ res.status(503).json({ok:false,error:e.message}); }
-});
-
-app.post('/api/orders', async (req,res)=>{
-  try {
-    const {customer, address, items, amount} = req.body;
-    if(!customer?.name || !safePhone(customer.phone) || !address?.line1 || !address?.city || !address?.state || !/^\d{6}$/.test(address.pincode)) return res.status(400).json({error:'Valid customer and delivery details are required.'});
-    if(!Array.isArray(items)||!items.length) return res.status(400).json({error:'Cart is empty.'});
-    const cleanItems=items.map(x=>({id:x.id,name:String(x.name),price:money(x.price),qty:Math.max(1,Math.min(99,Number(x.qty)||1)),image:String(x.image||''),variant:String(x.variant||'')}));
-    const calculated=money(cleanItems.reduce((s,x)=>s+x.price*x.qty,0));
-    if(money(amount)!==calculated) return res.status(400).json({error:'Order total mismatch. Please refresh cart and try again.'});
-    const orderId='ZEVQORA_'+Date.now()+'_'+crypto.randomBytes(3).toString('hex').toUpperCase();
-    await pool.query(`INSERT INTO orders(order_id,customer_name,customer_phone,customer_email,address,city,state,pincode,amount,items) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[orderId,customer.name,safePhone(customer.phone),customer.email||null,address.line1,address.city,address.state,address.pincode,calculated,JSON.stringify(cleanItems)]);
-    const cfOrder=await cf('/pg/orders',{method:'POST',body:JSON.stringify({order_id:orderId,order_amount:calculated,order_currency:'INR',customer_details:{customer_id:safePhone(customer.phone),customer_name:customer.name,customer_email:customer.email||undefined,customer_phone:safePhone(customer.phone)},order_meta:{
-        return_url:`${process.env.FRONTEND_BASE_URL || process.env.PUBLIC_BASE_URL}/?payment_return=1&order_id={order_id}`,
-        notify_url:`${process.env.PUBLIC_BASE_URL}/api/cashfree/webhook`
-      },order_note:'ZEVQORA online order'})});
-    await pool.query(`UPDATE orders SET cashfree_payment_session_id=$1,updated_at=NOW() WHERE order_id=$2`,[cfOrder.payment_session_id,orderId]);
-    res.json({orderId,paymentSessionId:cfOrder.payment_session_id,amount:calculated,cashfreeMode:process.env.CASHFREE_ENV==='production'?'production':'sandbox'});
-  } catch(e){ console.error(e); res.status(500).json({error:e.message}); }
-});
-
-app.get('/api/orders/:orderId', async (req,res)=>{
-  const {rows}=await pool.query('SELECT order_id,customer_name,customer_phone,amount,currency,items,payment_status,order_status,awb_number,tracking_url,created_at,updated_at FROM orders WHERE order_id=$1',[req.params.orderId]);
-  if(!rows[0]) return res.status(404).json({error:'Order not found'});
-  res.json(rows[0]);
-});
-
-app.get('/api/orders', async (req,res)=>{
-  const phone=safePhone(req.query.phone); if(phone.length!==10) return res.status(400).json({error:'Enter a valid mobile number.'});
-  const {rows}=await pool.query('SELECT order_id,amount,payment_status,order_status,awb_number,tracking_url,created_at,items FROM orders WHERE customer_phone=$1 ORDER BY created_at DESC',[phone]);
-  res.json(rows);
-});
-
-app.post('/api/orders/:orderId/status', async (req,res)=>{
-  if(req.headers['x-admin-secret']!==process.env.ADMIN_SECRET) return res.status(401).json({error:'Unauthorized'});
-  const {order_status,awb_number,tracking_url}=req.body;
-  const allowed=['PAYMENT_PENDING','CONFIRMED','PACKED','SHIPPED','IN_TRANSIT','OUT_FOR_DELIVERY','DELIVERED','CANCELLED'];
-  if(!allowed.includes(order_status)) return res.status(400).json({error:'Invalid status'});
-  const {rows}=await pool.query('UPDATE orders SET order_status=$1,awb_number=COALESCE($2,awb_number),tracking_url=COALESCE($3,tracking_url),updated_at=NOW() WHERE order_id=$4 RETURNING order_id,order_status,awb_number,tracking_url',[order_status,awb_number||null,tracking_url||null,req.params.orderId]);
-  if(!rows[0]) return res.status(404).json({error:'Order not found'}); res.json(rows[0]);
-});
-
-app.post('/api/cashfree/webhook', async (req,res)=>{
-  try {
-    const ts=req.headers['x-webhook-timestamp'], sig=req.headers['x-webhook-signature'];
-    if(!ts||!sig||!req.rawBody) return res.status(400).send('Missing signature');
-    const expected=crypto.createHmac('sha256',process.env.CASHFREE_CLIENT_SECRET).update(ts+req.rawBody).digest('base64');
-    if(!crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(sig))) return res.status(400).send('Invalid signature');
-    const body=JSON.parse(req.rawBody); const orderId=body?.data?.order?.order_id || body?.data?.order?.order_id;
-    const paymentStatus=body?.data?.payment?.payment_status;
-    if(orderId){
-      if(paymentStatus==='SUCCESS') await pool.query(`UPDATE orders SET payment_status='SUCCESS',order_status=CASE WHEN order_status='PAYMENT_PENDING' THEN 'CONFIRMED' ELSE order_status END,updated_at=NOW() WHERE order_id=$1`,[orderId]);
-      else if(paymentStatus==='FAILED') await pool.query(`UPDATE orders SET payment_status='FAILED',updated_at=NOW() WHERE order_id=$1`,[orderId]);
-    }
-    res.sendStatus(200);
-  } catch(e){ console.error(e); res.status(400).send('Webhook error'); }
-});
-
-app.get('/api/payment-status/:orderId', async (req,res)=>{
-  try {
-    const data=await cf(`/pg/orders/${encodeURIComponent(req.params.orderId)}/payments`,{method:'GET'});
-    const success=data.some(x=>x.payment_status==='SUCCESS');
-    if(success) await pool.query(`UPDATE orders SET payment_status='SUCCESS',order_status=CASE WHEN order_status='PAYMENT_PENDING' THEN 'CONFIRMED' ELSE order_status END,updated_at=NOW() WHERE order_id=$1`,[req.params.orderId]);
-    res.json({payments:data,paid:success});
-  } catch(e){res.status(500).json({error:e.message});}
-});
-
-initDatabase()
-  .then(() => app.listen(PORT,()=>console.log(`ZEVQORA server listening on ${PORT}`)))
-  .catch(err => { console.error('Database schema initialization failed:', err); process.exit(1); });
+app.use((err,req,res,next)=>{console.error(err);res.status(500).json({message:'Internal server error'});});
+const port=process.env.PORT||5000;
+app.listen(port,()=>console.log(`ZEVQORA API running on http://localhost:${port}`));
